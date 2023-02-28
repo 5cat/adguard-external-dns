@@ -4,7 +4,7 @@ use std::{
     ptr::eq,
 };
 
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::networking::v1::Ingress;
 use kube::{
     api::{Api, ListParams},
@@ -13,7 +13,6 @@ use kube::{
 };
 use reqwest;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Record {
@@ -23,7 +22,7 @@ struct Record {
 
 impl Record {
     fn new(domain: String, answer: String) -> Self {
-        Self {domain, answer}
+        Self { domain, answer }
     }
 }
 
@@ -41,13 +40,14 @@ impl PartialEq for Record {
 
 impl Eq for Record {}
 
-struct AdGuard {
-    host: String,
+#[derive(Clone, Copy)]
+struct AdGuard<'a> {
+    host: &'a str,
     use_https: bool,
 }
 
-impl AdGuard {
-    fn new(host: String, use_https: bool) -> Self {
+impl<'a> AdGuard<'a> {
+    fn new(host: &'a str, use_https: bool) -> Self {
         AdGuard { host, use_https }
     }
     fn build_url(&self, endpoint: &str) -> String {
@@ -99,13 +99,49 @@ impl AdGuard {
     }
 }
 
+struct IngressNeededInfo {
+    host: String,
+    ip: String,
+}
+
+fn extract_needed_info(ing: &Ingress) -> Vec<IngressNeededInfo> {
+    let mut hosts = vec![];
+    if let Some(ing_spec) = &ing.spec {
+        if let Some(ing_rules) = &ing_spec.rules {
+            // here im just returning the first rule since idc about other rules
+            for ing_rule in ing_rules {
+                if let Some(ing_host) = &ing_rule.host {
+                    hosts.push(ing_host)
+                }
+            }
+        }
+    }
+    let mut ip = None;
+    if let Some(ing_status) = &ing.status {
+        if let Some(ing_lb_status) = &ing_status.load_balancer {
+            if let Some(ing_lb_status_ingress) = &ing_lb_status.ingress {
+                assert!(ing_lb_status_ingress.len() <= 1);
+                for ing_lb_status_ing in ing_lb_status_ingress {
+                    ip = ing_lb_status_ing.ip.clone();
+                }
+            }
+        }
+    }
+    if let Some(ip_clear) = ip {
+        return hosts
+            .into_iter()
+            .map(|host| IngressNeededInfo {
+                host: host.clone(),
+                ip: ip_clear.clone(),
+            })
+            .collect();
+    }
+    vec![]
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let adguard = AdGuard::new("localhost:8080".into(), false);
-    let record = Record::new("banana.fish".into(), "168.264.76.1".into());
-    adguard.add_record(&record).await?;
-    dbg!(adguard.get_records().await?);
-    adguard.delete_record(&record).await?;
     // Infer the runtime environment and try to create a Kubernetes Client
     let client = Client::try_default().await?;
 
@@ -113,14 +149,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ingress: Api<Ingress> = Api::all(client);
 
     watcher(ingress, ListParams::default())
-        // .touched_objects()
         .try_for_each(|ing| async move {
+            println!("{:#?}", &ing);
             match &ing {
-                Event::Applied(s) => println!("Added"),
-                Event::Deleted(s) => println!("Deleted"),
-                Event::Restarted(s) => println!("Restarted"),
+                Event::Applied(s) => {
+                    println!("Added");
+                    for ini in extract_needed_info(s) {
+                        adguard
+                            .add_record(&Record::new(ini.host, ini.ip))
+                            .await
+                            .unwrap();
+                    }
+                }
+                Event::Deleted(s) => {
+                    println!("Deleted");
+                    for ini in extract_needed_info(s) {
+                        adguard
+                            .delete_record(&Record::new(ini.host, ini.ip))
+                            .await
+                            .unwrap();
+                    }
+                }
+                Event::Restarted(ss) => {
+                    println!("Restarted");
+                    let current_records = adguard.get_records().await.unwrap();
+                    for s in ss {
+                        for ini in extract_needed_info(s) {
+                            let record = &Record::new(ini.host.clone(), ini.ip.clone());
+                            if !current_records.contains_key(&ini.host) {
+                                adguard.add_record(record).await.unwrap();
+                            } else if current_records.get(&ini.host).unwrap().eq(&ini.ip) {
+                                adguard.delete_record(record).await.unwrap();
+                                adguard.add_record(record).await.unwrap();
+                            }
+                        }
+                    }
+                }
             };
-            println!("{:#?}", ing);
             Ok(())
         })
         .await?;
