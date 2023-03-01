@@ -1,14 +1,15 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     hash::{Hash, Hasher},
-    ptr::eq,
 };
 
-use futures::{StreamExt, TryStreamExt};
+use clap::Parser;
+
+use futures::TryStreamExt;
 use k8s_openapi::api::networking::v1::Ingress;
 use kube::{
     api::{Api, ListParams},
-    runtime::{watcher, watcher::Event, WatchStreamExt},
+    runtime::{watcher, watcher::Event},
     Client,
 };
 use reqwest;
@@ -139,9 +140,19 @@ fn extract_needed_info(ing: &Ingress) -> Vec<IngressNeededInfo> {
     vec![]
 }
 
+#[derive(Parser, Debug)]
+struct MyOptions {
+    #[arg(env)]
+    adguard_host: String,
+    #[arg(short, long, env, default_value_t = false)]
+    adguard_use_https: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let adguard = AdGuard::new("localhost:8080".into(), false);
+    let opts = MyOptions::parse();
+    dbg!(&opts);
+    let adguard = AdGuard::new(&opts.adguard_host, opts.adguard_use_https);
     // Infer the runtime environment and try to create a Kubernetes Client
     let client = Client::try_default().await?;
 
