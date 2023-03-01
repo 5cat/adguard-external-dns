@@ -6,11 +6,11 @@ use std::{
 use clap::Parser;
 
 use futures::TryStreamExt;
-use k8s_openapi::api::networking::v1::Ingress;
+use k8s_openapi::{api::networking::v1::Ingress, Metadata};
 use kube::{
-    api::{Api, ListParams},
+    api::{Api, ListParams, Patch, PatchParams},
     runtime::{watcher, watcher::Event},
-    Client,
+    Client, Error,
 };
 use reqwest;
 use serde::{Deserialize, Serialize};
@@ -100,21 +100,40 @@ impl<'a> AdGuard<'a> {
     }
 }
 
-struct IngressNeededInfo {
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+struct IngressRecord {
     host: String,
-    ip: String,
+    ip: String
+}
+
+#[derive(Debug, Clone)]
+struct IngressNeededInfo {
+    current: IngressRecord,
+    old: Option<IngressRecord>
 }
 
 fn extract_needed_info(ing: &Ingress) -> Vec<IngressNeededInfo> {
     let mut hosts = vec![];
+    let mut old_hosts = vec![];
+    let mut old_ips = vec![];
     if let Some(ing_spec) = &ing.spec {
         if let Some(ing_rules) = &ing_spec.rules {
             // here im just returning the first rule since idc about other rules
             for ing_rule in ing_rules {
                 if let Some(ing_host) = &ing_rule.host {
-                    hosts.push(ing_host)
+                    hosts.push(ing_host);
+                    break;
                 }
             }
+        }
+    }
+    if let Some(ing_ann) = &ing.metadata.annotations {
+        if let Some(old_host) = ing_ann.get("adguard-external-dns/old-host") {
+            old_hosts.push(old_host.clone());
+        }
+        if let Some(old_ip) = ing_ann.get("adguard-external-dns/old-ip") {
+            old_ips.push(old_ip.clone());
         }
     }
     let mut ip = None;
@@ -128,16 +147,44 @@ fn extract_needed_info(ing: &Ingress) -> Vec<IngressNeededInfo> {
             }
         }
     }
+    assert!(old_hosts.len() <= 1);
+    assert!(old_ips.len() <= 1);
+    let mut old_record: Option<IngressRecord> = None;
+    if old_hosts.len() > 0 {
+        old_record = Some(IngressRecord {host: old_hosts.get(0).unwrap().clone(), ip: old_ips.get(0).unwrap().clone()});
+    }
     if let Some(ip_clear) = ip {
         return hosts
             .into_iter()
             .map(|host| IngressNeededInfo {
-                host: host.clone(),
-                ip: ip_clear.clone(),
+                current: IngressRecord { host: host.clone(), ip: ip_clear.clone() },
+                old: old_record.clone()
             })
             .collect();
     }
     vec![]
+}
+
+async fn update_annotations(
+    ingress: &Api<Ingress>,
+    ing: &Ingress,
+    record: &IngressRecord,
+) -> Result<(), kube::Error> {
+    // Ingress::patch(ing.metadata.name.unwrap() ing.metadata.namespace.unwrap(), body, optional)
+    let params = PatchParams::apply("adguard-external-dns");
+    let patch = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                "adguard-external-dns/old-host": record.host,
+                "adguard-external-dns/old-ip": record.ip
+            }
+        }
+    });
+    let patch = Patch::Merge(&patch);
+    ingress
+        .patch(&ing.metadata.name.as_ref().unwrap(), &params, &patch)
+        .await?;
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -157,17 +204,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::try_default().await?;
 
     // Read pods in the configured namespace into the typed interface from k8s-openapi
-    let ingress: Api<Ingress> = Api::all(client);
+    let ingress: Api<Ingress> = Api::all(client.clone());
 
     watcher(ingress, ListParams::default())
         .try_for_each(|ing| async move {
+            let client_2 = Client::try_default().await.unwrap();
             println!("{:#?}", &ing);
             match &ing {
                 Event::Applied(s) => {
                     println!("Added");
+                    let ingress_namespaced: Api<Ingress> =
+                        Api::namespaced(client_2, s.metadata.namespace.as_ref().unwrap());
                     for ini in extract_needed_info(s) {
-                        adguard
-                            .add_record(&Record::new(ini.host, ini.ip))
+                        dbg!(&ini);
+                        let record = Record::new(ini.current.host.clone(), ini.current.ip.clone());
+                        if let Some(old_record) = ini.old {
+                            if old_record != ini.current {
+                                println!("deleting old record {:#?}", old_record);
+                                adguard.delete_record(&Record::new(old_record.host.clone(), old_record.ip.clone())).await.unwrap();
+                                println!("records do not match {:#?} != {:#?}", old_record, ini.current);
+                                adguard.add_record(&record).await.unwrap();
+                            }
+                        } else {
+                            adguard.add_record(&record).await.unwrap();
+                        }
+                        update_annotations(&ingress_namespaced, &s, &ini.current)
                             .await
                             .unwrap();
                     }
@@ -176,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Deleted");
                     for ini in extract_needed_info(s) {
                         adguard
-                            .delete_record(&Record::new(ini.host, ini.ip))
+                            .delete_record(&Record::new(ini.current.host, ini.current.ip))
                             .await
                             .unwrap();
                     }
@@ -186,10 +247,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let current_records = adguard.get_records().await.unwrap();
                     for s in ss {
                         for ini in extract_needed_info(s) {
-                            let record = &Record::new(ini.host.clone(), ini.ip.clone());
-                            if !current_records.contains_key(&ini.host) {
+                            let record = &Record::new(ini.current.host.clone(), ini.current.ip.clone());
+                            if !current_records.contains_key(&ini.current.host) {
                                 adguard.add_record(record).await.unwrap();
-                            } else if current_records.get(&ini.host).unwrap().eq(&ini.ip) {
+                            } else if current_records.get(&ini.current.host).unwrap().eq(&ini.current.ip) {
                                 adguard.delete_record(record).await.unwrap();
                                 adguard.add_record(record).await.unwrap();
                             }
