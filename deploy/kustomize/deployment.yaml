@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+    name: adguard-external-dns
+    labels:
+        app: adguard-external-dns
+spec:
+    replicas: 1
+    selector:
+        matchLabels:
+            app: adguard-external-dns
+    template:
+        metadata:
+            labels:
+                app: adguard-external-dns
+        spec:
+            serviceAccountName: adguard-external-dns
+            containers:
+                - name: adguard-external-dns
+                  image: ghcr.io/5cat/adguard-external-dns
+                  env: []

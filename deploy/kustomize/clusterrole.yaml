@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+    name: adguard-external-dns-readonly-ingress
+    annotations:
+        rbac.authorization.kubernetes.io/autoupdate: 'true'
+rules:
+    - apiGroups:
+          - networking.k8s.io
+      resources:
+          - ingresses
+      verbs:
+          - get
+          - list
+          - watch
+          - patch

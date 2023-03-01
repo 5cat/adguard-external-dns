@@ -1,0 +1,11 @@
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+    name: adguard-external-dns-role-binding
+subjects:
+    - kind: ServiceAccount
+      name: adguard-external-dns
+roleRef:
+    kind: ClusterRole
+    name: adguard-external-dns-readonly-ingress
+    apiGroup: rbac.authorization.k8s.io
