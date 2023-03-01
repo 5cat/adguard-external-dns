@@ -6,14 +6,14 @@ use std::{
 
 use clap::Parser;
 
-use futures::{pin_mut, StreamExt, TryStreamExt};
-use k8s_openapi::{api::networking::v1::Ingress, Metadata};
+use futures::{pin_mut, TryStreamExt};
+use k8s_openapi::api::networking::v1::Ingress;
 use kube::{
     api::{Api, ListParams, Patch, PatchParams},
     runtime::{watcher, watcher::Event},
     Client,
 };
-use reqwest;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -55,10 +55,10 @@ impl<'a> AdGuard<'a> {
     fn build_url(&self, endpoint: &str) -> String {
         let mut url = "http".to_owned();
         if self.use_https {
-            url.push_str("s");
+            url.push('s');
         }
         url.push_str("://");
-        url.push_str(&self.host);
+        url.push_str(self.host);
         url.push_str(endpoint);
         url
     }
@@ -95,7 +95,7 @@ impl<'a> AdGuard<'a> {
         // &response.error_for_status()?;
         let mut res: HashMap<String, String> = HashMap::new();
         for r in data {
-            res.insert(r.domain.into(), r.answer.into());
+            res.insert(r.domain, r.answer);
         }
         Ok(res)
     }
@@ -150,7 +150,7 @@ fn extract_needed_info(ing: &Ingress) -> Vec<IngressNeededInfo> {
     assert!(old_hosts.len() <= 1);
     assert!(old_ips.len() <= 1);
     let mut old_record: Option<IngressRecord> = None;
-    if old_hosts.len() > 0 {
+    if !old_hosts.is_empty() {
         old_record = Some(IngressRecord {
             host: old_hosts.get(0).unwrap().clone(),
             ip: old_ips.get(0).unwrap().clone(),
@@ -188,7 +188,7 @@ async fn update_annotations(
     });
     let patch = Patch::Merge(&patch);
     ingress
-        .patch(&ing.metadata.name.as_ref().unwrap(), &params, &patch)
+        .patch(ing.metadata.name.as_ref().unwrap(), &params, &patch)
         .await?;
     Ok(())
 }
@@ -215,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read pods in the configured namespace into the typed interface from k8s-openapi
     let ingress: Api<Ingress> = Api::all(client.clone());
 
-    let domain_regex_string = &opts.domain_regex.unwrap_or(".*".to_owned()).clone();
+    let domain_regex_string = &opts.domain_regex.unwrap_or_else(|| ".*".to_owned());
     let domain_regex = Regex::new(domain_regex_string).unwrap();
     let w = watcher(ingress, ListParams::default());
     pin_mut!(w);
@@ -253,7 +253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         adguard.add_record(&record).await.unwrap();
                     }
-                    update_annotations(&ingress_namespaced, &s, &ini.current)
+                    update_annotations(&ingress_namespaced, s, &ini.current)
                         .await
                         .unwrap();
                 }
