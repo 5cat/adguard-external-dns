@@ -11,7 +11,7 @@ use k8s_openapi::{api::networking::v1::Ingress, Metadata};
 use kube::{
     api::{Api, ListParams, Patch, PatchParams},
     runtime::{watcher, watcher::Event},
-    Client, Error,
+    Client,
 };
 use reqwest;
 use serde::{Deserialize, Serialize};
