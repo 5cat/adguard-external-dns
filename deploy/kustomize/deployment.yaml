@@ -18,4 +18,8 @@ spec:
             containers:
                 - name: adguard-external-dns
                   image: ghcr.io/5cat/adguard-external-dns
-                  env: []
+                  env:
+                      - name: ADGUARD_HOST
+                        value: adguard.adguard.svc.local.:3000
+                      - name: DOMAIN_REGEX
+                        value: '.*\.example\.com'
